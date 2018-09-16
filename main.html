@@ -1,0 +1,149 @@
+<!-- Adapted from https://github.com/quietshu/apple-pencil-safari-api-test -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Paper</title>
+  <style>
+    body {
+      position: absolute;
+      margin: 0px;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+    }
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0.1;
+    }
+  </style>
+</head>
+<body>
+<div id="force"></div>
+<img id="touches" src=""></img>
+<canvas>Unsupported browser.</canvas>
+<script>
+  var ratio = window.devicePixelRatio || 1;
+  var $force = document.querySelectorAll('#force')[0]
+  var $touches = document.querySelectorAll('#touches')[0]
+  var canvas = document.querySelectorAll('canvas')[0]
+  var context = canvas.getContext('2d')
+  var lineWidth = 0
+  var isMousedown = false
+  var points = []
+  canvas.width = window.innerWidth * ratio
+  canvas.height = window.innerHeight * ratio
+  if (canvas.width < canvas.height) {
+    touches.style.width = "100%"
+  }
+  else {
+    touches.style.height = "100%"
+  }
+  console.log(touches.style)
+  context.beginPath();
+  context.rect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "rgba(254, 254, 254, 0.01)"; //jpeg needs white background.
+  context.fill()
+
+  function touchData(e) {
+    var touch = new Object()
+    touch.x = e.pageX * ratio
+    touch.y = e.pageY * ratio
+    touch.pressure = 0.1
+    if (e.touches) {
+      touch.pressure = e.touches[0]["force"]
+      touch.x = e.touches[0].pageX * ratio
+      touch.y = e.touches[0].pageY * ratio
+    }
+    return touch
+  }
+
+  function updatePaper() {
+    var image = canvas.toDataURL("image/png", 0.9) //change to jpeg?
+    var fetchAddress = "http://" + window.location.hostname + ":8989/image"
+    fetch(fetchAddress, {
+      method: "POST",
+      body: image,
+      headers: {
+        'Content-Type': 'text/plain',
+      },
+    }).catch(err => console.log(err)).then(out => out.text()).then((out) => {
+      $touches.src = out
+    })
+  }
+  setInterval(updatePaper, 2000)
+
+  ;['touchstart', 'mousedown'].forEach(function (ev) {
+    canvas.addEventListener(ev, function (e) {
+      touch = touchData(e)
+      lineWidth = 10//(Math.log(pressure + 1) * 40 * 0.4 + lineWidth * 0.6)
+      points.push({
+        x: touch.x, y: touch.y, lineWidth
+      })
+      isMousedown = true
+      context.lineWidth = lineWidth
+      context.strokeStyle = 'black'
+      context.lineCap = 'round'
+      context.lineJoin = 'round'
+      context.beginPath()
+      context.moveTo(touch.x, touch.y)
+      points.push({
+        x:touch.x, y:touch.y, lineWidth
+      })
+    })
+  })
+  ;['touchmove', 'mousemove'].forEach(function (ev) {
+    canvas.addEventListener(ev, function (e) {
+      if (!isMousedown) return
+      touch = touchData(e)
+      lineWidth = 10//(Math.log(pressure + 1) * 40 * 0.4 + lineWidth * 0.6)
+      points.push({
+        x: touch.x, y: touch.y, lineWidth
+      })
+      context.strokeStyle = 'black'
+      context.globalAlpha = touch.pressure
+      context.lineCap = 'round'
+      context.lineJoin = 'round'
+      if (points.length >= 3) {
+        var l = points.length - 1
+        var xc = (points[l].x + points[l - 1].x) / 2
+        var yc = (points[l].y + points[l - 1].y) / 2
+        context.lineWidth = points[l - 1].lineWidth
+        context.quadraticCurveTo(points[l - 1].x, points[l - 1].y, xc, yc)
+        context.stroke()
+        context.beginPath()
+        context.moveTo(xc, yc)
+      }
+      e.preventDefault()
+    })
+  })
+  ;['touchend', 'touchleave', 'mouseup'].forEach(function (ev) {
+    canvas.addEventListener(ev, function (e) {
+      touch = touchData(e)
+      lineWidth = 10//(Math.log(pressure + 1) * 40 * 0.4 + lineWidth * 0.6)
+      points.push({
+        x: touch.x, y: touch.y, lineWidth
+      })
+      isMousedown = false
+      context.strokeStyle = 'black'
+      context.lineCap = 'round'
+      context.lineJoin = 'round'
+      if (points.length >= 3) {
+        var l = points.length - 1
+        context.quadraticCurveTo(points[l].x, points[l].y, touch.x, touch.y)
+        context.stroke()
+      }
+      points = []
+      lineWidth = 0
+      updatePaper()
+    })
+  })
+</script>
+</body>
+</html>

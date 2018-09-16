@@ -1,0 +1,17 @@
+python3 train.py --continue_train --epoch_count XXX --gpu_ids 0,1 --dataroot ../sketchydata/spidercycle/ --name spider_cycle --model cycle_gan --batch_size 4
+
+rename "s/.jpg/-1.jpg/g" *
+
+python3 train.py  --gpu_ids 0,1 --dataroot ../sketchydata/spiderpixpix/paired --name spider_pixpix --model pix2pix --batch_size 4
+
+python3 train.py --gpu_ids 0,1 --dataroot ../religioussculptland/pairedAB/ --name religioussculptland_pix2pix --model pix2pix --batch_size 2 --num_threads 8 --loadSize 1024 --fineSize 1024
+
+python3 test.py --dataroot ~/religioussculptland/B2 --model pix2pix --name edges_to_drawing --gpu_ids 0,1 --batch_size 2 --num_test 1900
+
+rm -rf /religioussculptland/A/train
+cp *_fake_A* ~/religioussculptland/A/train
+rename "s/_fake_A//g" *
+
+python3 ~/pytorch-CycleGAN-and-pix2pix/datasets/combine_A_and_B.py --fold_A ~/religioussculptland/A --fold_B ~/religioussculptland/B --fold_AB ~/religioussculptland/pairedAB
+
+python3 train.py  --gpu_ids 0,1 --dataroot ~/religioussculptland/cycleganwatercolor/ --name religioussculptland_cycle2 --model cycle_gan --batch_size 2 --loadSize 1056 --fineSize 1024 --display_freq 100
