@@ -1,6 +1,7 @@
 #religioussculptland_pix2pix uses a CycleGan trained on laplacian edge detector <-> full image as a better edge detectorself.
 #The cyclegan is used to process wikiart images to get their edges. Then a pix2pix model is trained from these very simple edges -> full image.
 #uses https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix -- run in same folder, or have IPython/Hydrogen running in same folder.
+#If try edges from training set vs that same edge with half occluded, can see if model is overfitting.
 
 # imports for flask part
 import flask #use flask==0.12.2 and debug=False to run in ipython
@@ -29,18 +30,19 @@ CORS(app)
 def setupModel():
     opt = TestOptions().parse() #get all cyclegan's options
     opt.model = "cycle_gan"
-    opt.name = "religioussculptland_cyclemoreedge"
+    opt.name = "hhs_to_drawing"
+    # opt.name = "religioussculptland_cycle2"
     # opt.netG = "unet_256" #pix2pix
     # opt.no_lsgan = True
     # opt.norm = "batch"
     # opt.no_flip = True
     opt.display_id = -1
     opt.input_nc = 3
-    # opt.isTrain = False
+    opt.isTrain = False
     opt.eval = True
     opt.output_nc = 3
-    opt.loadSize =128
-    opt.fineSize =127
+    opt.loadSize =256
+    opt.fineSize =256
     model = create_model(opt)
     model.setup(opt)
     return model
@@ -61,7 +63,7 @@ def preprocessSketchImg(img):
     smallerSideLen = np.min(img.shape[:2])
     img = img[:smallerSideLen, :smallerSideLen]
     img = Image.fromarray(img)
-    img = transforms.Resize((128,128))(img)
+    img = transforms.Resize((256,256))(img)
     img = transforms.ToTensor()(img)
     img = (img - 0.5) / 0.5
     img = img.unsqueeze(0)
@@ -73,7 +75,7 @@ def preprocessSketchImg(img):
 def index():
     return "Hello sketches"
 
-img = Image.open("epoch008_real_A.png")
+img = Image.open("epoch008_real_A2.png")
 @app.route('/image', methods=['POST'])
 def login():
     if request.method == 'POST':
