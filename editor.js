@@ -36,7 +36,11 @@ function fetchWordVectors(onProgress) {
   })
 }
 
-async function loadWordVectors(zipArrayBuffer) {
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function loadWordVectors(zipArrayBuffer, onProgress) {
   let text = await JSZip.loadAsync(zipArrayBuffer).then(res => res.files["glove.6B.50d.txt"].async("string"))
     .catch(err => console.log("✗ Error unzipping vector file:\n" + err))
 
@@ -62,6 +66,11 @@ async function loadWordVectors(zipArrayBuffer) {
       let feat = vector[jdx] / magnitude
       wordVectors.set(feat, parseInt(idx), parseInt(jdx))
     }
+
+    if (idx % Math.floor(lines.length / 100) == 0) {
+      onProgress(parseInt(idx)/lines.length)
+      await sleep(1) //react needs a frame to render or something like that
+    }
   }
 
   console.log("✓ Loaded word vector matrix of shape " + wordVectors.shape)
@@ -71,6 +80,7 @@ async function loadWordVectors(zipArrayBuffer) {
 }
 
 function getHighestKIndices(array, k) {
+  k = k + 1
   let highestValues = Array(k)
   for (var i=0; i<array.length; i++) {
     for (var j=0; j<highestValues.length; j++) {
@@ -86,7 +96,7 @@ function getHighestKIndices(array, k) {
     }
   }
   highestValues.sort((a, b) => b.val - a.val)
-  highestValues = highestValues.map(x => x.index)
+  highestValues = highestValues.slice(1).map(x => x.index)
   return highestValues
 }
 
@@ -102,25 +112,37 @@ class App extends React.Component {
     }
   }
 
-  // decorator = new CompositeDecorator([
-  //   {
-  //     strategy: findWords,
-  //     component: AddSpan,
-  //   },
-  // ]);
-  // AddSpan = (props) => {
-  //   return <span {...props}>{props.children}</span>;
-  // };
-  // function
+  //"absolute" is positioned relative to closet parent with "relative", default position is static
+  createSuggestionsDecorator(blockKey, start, end, similarWords) {
+    let AddSpan = (props) => {
+      return (<span id="activeWord" style={{position: "relative"}}>
+        {props.children}
+      </span>)
+    };
+    let findWords = (contentBlock, callBack, contentState) => {
+      if (contentBlock.getKey() == blockKey) {
+        callBack(start, end)
+      }
+    }
+    let decorator = new Draft.CompositeDecorator([
+      {
+        strategy: findWords,
+        component: AddSpan,
+      },
+    ]);
+    return decorator
+  }
 
   constructor(props) {
     super(props)
     tf.setBackend("cpu") //using webgl backend causes slight freeze after every big matrix op
     console.log("✓ Loaded react")
-    fetchWordVectors(loadProgress => this.setState({loadProgress}))
+    let onProgress = loadProgress => {this.setState({loadProgress})}
+
+    fetchWordVectors(onProgress)
       .then(buffer => {
-        this.setState({loadState: ["Loading word vectors", 1]})
-        return loadWordVectors(buffer)
+        this.setState({loadState: ["Loading word vectors", 1], loadProgress: 0})
+        return loadWordVectors(buffer, onProgress)
       }).then((wordData) => {
         this.setState({
           wordVectors: wordData[0],
@@ -131,7 +153,7 @@ class App extends React.Component {
       })
     this.state = {
       editorState: Draft.EditorState.createEmpty(),
-      activeWordData: {text: "", x:0, y:0},
+      activeWord: {text: "", blockKey: "", pos: null},
       similarWords: [],
       vectorsLoaded: false,
       wordDict: null,
@@ -153,21 +175,24 @@ class App extends React.Component {
   //su eyr ad
   onChange(editorState) {
     this.setState((currentState, props) => {
-      let activeWord = this.getActiveWord(editorState)
+      let word = this.getActiveWord(editorState)
+      let wordText = word.text
       let lastChange = editorState.getLastChangeType()
 
       let wasCharacterEdit = lastChange == 'insert-characters' || lastChange == 'backspace-character'
       let wasSelectionChange = currentState.editorState.getCurrentContent() == editorState.getCurrentContent()
-      let isNewWord = activeWord != currentState.activeWordData.text
+      let isNewWord = wordText != currentState.activeWord.text || word.blockKey != currentState.activeWord.blockKey
+        || word.wordStart !=currentState.activeWord.wordStart
       let selectionExists = window.getSelection().rangeCount !=0
-      let vectorAvailible = this.state.vectorsLoaded && activeWord in this.state.wordDict.fromWord
+      let vectorAvailible = this.state.vectorsLoaded && wordText in this.state.wordDict.fromWord
 
       if((wasCharacterEdit || wasSelectionChange) && isNewWord && selectionExists && vectorAvailible) {
         let cursor = window.getSelection().getRangeAt(0).getBoundingClientRect()
-        let similarWords = this.getWordSuggestions(activeWord)
+        let similarWords = this.getWordSuggestions(wordText)
+        let wordDecorator = this.createSuggestionsDecorator(word.blockKey, word.wordStart, word.wordEnd, similarWords)
         return {
-          editorState,
-          activeWordData: {text: activeWord, x: cursor.x, y: cursor.y + cursor.height},
+          editorState: Draft.EditorState.set(editorState, {decorator: wordDecorator}),
+          activeWord: word,
           similarWords
         }
       }
@@ -176,8 +201,8 @@ class App extends React.Component {
       }
       else {
         return {
-          editorState,
-          activeWordData: {...currentState.activeWordData, text: activeWord},
+          editorState: Draft.EditorState.set(editorState, {decorator: null}),
+          activeWord: word,
           similarWords: [],
         }
       }
@@ -185,18 +210,25 @@ class App extends React.Component {
   }
 
   getActiveWord(editorState) {
-      let selectionState = editorState.getSelection();
-      let anchorKey = selectionState.getAnchorKey();
+      let selectionState = editorState.getSelection()
+      let blockKey = selectionState.getAnchorKey()
       let currentContent = editorState.getCurrentContent();
-      let currentContentBlock = currentContent.getBlockForKey(anchorKey);
+      let currentContentBlock = currentContent.getBlockForKey(blockKey);
       let text = currentContentBlock.getText()
-      let start = selectionState.getStartOffset();
+      let start = selectionState.getStartOffset()
+      let end = selectionState.getEndOffset()
       let wordStart = text.lastIndexOf(" ", start-1)
       let wordEnd = text.indexOf(" ", start-1)
-      if (wordStart == -1) wordStart = 0
-      if (wordEnd == -1) wordEnd = text.length
-      let word = text.substring(wordStart, wordEnd).trim().toLowerCase()
-      return word
+      let word
+      if (start != end) {
+        word = null
+      }
+      else {
+        if (wordStart == -1) wordStart = 0
+        if (wordEnd == -1) wordEnd = text.length
+        word = text.substring(wordStart, wordEnd).trim().toLowerCase()
+      }
+      return {text: word, blockKey, wordStart, wordEnd}
   }
 
   getWordSuggestions(word) {
@@ -219,7 +251,28 @@ class App extends React.Component {
     return similarWords
   }
 
+  componentDidUpdate() {
+    let currentWord = document.getElementById("activeWord")
+    let lastPos = this.state.activeWord.pos
+
+    if (currentWord) {
+      let pos = currentWord.getBoundingClientRect()
+      if (lastPos == null || (pos.x != lastPos.x && pos.y != lastPos.y)) {
+        this.setState({activeWord: {...this.state.activeWord, pos}})
+        console.log("updating pos")
+      }
+    }
+    else if (!currentWord && lastPos != null) {
+        this.setState({activeWord: {...this.state.activeWord, pos: null}})
+    }
+  }
+
   render() {
+    let doRenderDropdown = this.state.activeWord.pos != null
+    if (doRenderDropdown) {
+      var x = this.state.activeWord.pos.x
+      var  y = this.state.activeWord.pos.y + 23
+    }
     return (
       <div style={{height: "100%", width: "100%"}}>
         <StatusBar state={this.state.loadState} progress={this.state.loadProgress} loaded={this.state.vectorsLoaded} />
@@ -230,8 +283,8 @@ class App extends React.Component {
             handleKeyCommand={this.handleKeyCommand.bind(this)}
             style={{height: "10px"}}
           />
-          <Dropdown similarWords={this.state.similarWords} activeWordData={this.state.activeWordData} />
         </div>
+        {doRenderDropdown && <Dropdown similarWords={this.state.similarWords} position={{x, y}}/>}
       </div>
     )
   }
@@ -241,9 +294,15 @@ class Dropdown extends React.Component {
 
   style = {
     dropdown: {
+      fontFamily: "Sans-Serif",
       borderRadius: "7px",
       boxShadow: "0px 1px 4px #ccc",
       overflow: "hidden",
+      position: "absolute",
+      backgroundColor: "white",
+      zIndex: 100,
+      MozUserSelect:"none",
+      WebkitUserSelect:"none",
     },
     list: {
       listStyle: "none",
@@ -267,7 +326,7 @@ class Dropdown extends React.Component {
 
   render() {
     return (
-      <div style={{position: "absolute", top: this.props.activeWordData.y, left: this.props.activeWordData.x, ...this.style.dropdown}}>
+      <div style={{top: this.props.position.y, left: this.props.position.x, ...this.style.dropdown}}>
         <ul style={this.style.list}>
         {this.props.similarWords.map((word) =>
           <div key={word}>
@@ -299,12 +358,12 @@ class StatusBar extends React.Component {
     super(props)
   }
   render () {
-    let doShowProgress = this.props.state[1] == 0
+    let doShowProgress = this.props.state[1] == 0 || this.props.state[1] == 1
     let progress = "(" + Math.round(this.props.progress * 100).toString() + "%)"
     return (
-    <div style={this.style.bar}>
-      <div>{this.props.state[0] + " "} {doShowProgress && progress}</div>
-    </div>
+      <div style={this.style.bar}>
+        <div>{this.props.state[0] + " "} {doShowProgress && progress}</div>
+      </div>
     )
   }
 }
