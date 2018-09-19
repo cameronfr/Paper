@@ -3,18 +3,42 @@
 
 const vectorURL = "https://storage.googleapis.com/mlstorage-cloud/Data/glove.6B.50d.txt.zip"
 
-async function loadWordVectors() {
-  localforage.setDriver(localforage.INDEXEDDB)
-  let zip = await localforage.getItem('vectorZip')
-  if(zip == null) {
-    zip = await fetch(vectorURL).then(res => res.arrayBuffer())
-    await localforage.setItem('vectorZip', zip)
-    console.log("✓ Downloaded and stored vector file")
-  } else {
-    console.log("✓ Found stored vector file")
-  }
-  let text = await JSZip.loadAsync(zip).then(res => res.files["glove.6B.50d.txt"].async("string"))
-      .catch(err => console.log("✗ Error fetching and unzipping vector file:\n" + err))
+//fetch doesn't have progress, file too big to not have indicator ==> xhr ugliness.
+function fetchWordVectors(onProgress) {
+  return new Promise((resolve, reject) => {
+    localforage.setDriver(localforage.INDEXEDDB)
+    localforage.getItem('vectorZip').then(zip => {
+      if (zip == null) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", vectorURL, true);
+        xhr.responseType = "arraybuffer";
+        xhr.onerror = (e) => {
+          console.log("✗ Error fetching vector file:\n" + xhr.statusText)
+          reject(xhr.statusText)
+        }
+        xhr.onload = (e) => {
+          let zip = xhr.response
+          localforage.setItem('vectorZip', zip).then(() => {
+            console.log("✓ Downloaded and stored vector file")
+            resolve(zip)
+          })
+        }
+        xhr.onprogress = (e) => {
+          onProgress(e.loaded / e.total)
+        }
+        xhr.send();
+      }
+      else {
+        console.log("✓ Found stored vector file")
+        resolve(zip)
+      }
+    })
+  })
+}
+
+async function loadWordVectors(zipArrayBuffer) {
+  let text = await JSZip.loadAsync(zipArrayBuffer).then(res => res.files["glove.6B.50d.txt"].async("string"))
+    .catch(err => console.log("✗ Error unzipping vector file:\n" + err))
 
   let lines = text.split("\n")
   lines = lines.slice(0, -1)
@@ -64,12 +88,10 @@ function getHighestKIndices(array, k) {
   highestValues.sort((a, b) => b.val - a.val)
   highestValues = highestValues.map(x => x.index)
   return highestValues
-
 }
 
 class App extends React.Component {
 
-  vectorsLoaded = false
   styles = {
     editor: {
       width: "100%",
@@ -95,15 +117,27 @@ class App extends React.Component {
     super(props)
     tf.setBackend("cpu") //using webgl backend causes slight freeze after every big matrix op
     console.log("✓ Loaded react")
-    loadWordVectors().then((wordData) => {
-      this.wordVectors = wordData[0]
-      this.wordDict = wordData[1]
-      this.vectorsLoaded = true
-    })
+    fetchWordVectors(loadProgress => this.setState({loadProgress}))
+      .then(buffer => {
+        this.setState({loadState: ["Loading word vectors", 1]})
+        return loadWordVectors(buffer)
+      }).then((wordData) => {
+        this.setState({
+          wordVectors: wordData[0],
+          wordDict: wordData[1],
+          vectorsLoaded: true,
+          loadState: ["Ready", 3]
+        })
+      })
     this.state = {
       editorState: Draft.EditorState.createEmpty(),
       activeWordData: {text: "", x:0, y:0},
       similarWords: [],
+      vectorsLoaded: false,
+      wordDict: null,
+      wordVectors: null,
+      loadProgress: 0.0,
+      loadState: ["Downloading word vectors", 0]
     }
   }
 
@@ -126,7 +160,7 @@ class App extends React.Component {
       let wasSelectionChange = currentState.editorState.getCurrentContent() == editorState.getCurrentContent()
       let isNewWord = activeWord != currentState.activeWordData.text
       let selectionExists = window.getSelection().rangeCount !=0
-      let vectorAvailible = this.vectorsLoaded && activeWord in this.wordDict.fromWord
+      let vectorAvailible = this.state.vectorsLoaded && activeWord in this.state.wordDict.fromWord
 
       if((wasCharacterEdit || wasSelectionChange) && isNewWord && selectionExists && vectorAvailible) {
         let cursor = window.getSelection().getRangeAt(0).getBoundingClientRect()
@@ -167,34 +201,37 @@ class App extends React.Component {
 
   getWordSuggestions(word) {
     //make word vector
-    let wordIndex = this.wordDict.fromWord[word]
-    let wordVectorsBuffer = this.wordVectors.buffer()
-    let vectorLength = this.wordVectors.shape[1]
+    let wordIndex = this.state.wordDict.fromWord[word]
+    let wordVectorsBuffer = this.state.wordVectors.buffer()
+    let vectorLength = this.state.wordVectors.shape[1]
     let vector = tf.buffer([vectorLength, 1], "float32")
-    for (var idx = 0; idx < this.wordVectors.shape[1]; idx++) {
+    for (var idx = 0; idx < this.state.wordVectors.shape[1]; idx++) {
       vector.set(wordVectorsBuffer.get(wordIndex, idx), idx, 0)
     }
     vector = vector.toTensor()
     //get similarities
-    let similarities = tf.matMul(this.wordVectors, vector)
+    let similarities = tf.matMul(this.state.wordVectors, vector)
     let similarityData = similarities.dataSync()
     similarities.dispose()
     vector.dispose()
     let similarWordIndexes = getHighestKIndices(similarityData, 10)
-    let similarWords = similarWordIndexes.map(x => this.wordDict.fromIdx[x])
+    let similarWords = similarWordIndexes.map(x => this.state.wordDict.fromIdx[x])
     return similarWords
   }
 
   render() {
     return (
-      <div style={this.styles.editor}>
-        <Draft.Editor
-          editorState={this.state.editorState}
-          onChange={this.onChange.bind(this)}
-          handleKeyCommand={this.handleKeyCommand.bind(this)}
-          style={{height: "10px"}}
-        />
-        <Dropdown similarWords={this.state.similarWords} activeWordData={this.state.activeWordData} />
+      <div style={{height: "100%", width: "100%"}}>
+        <StatusBar state={this.state.loadState} progress={this.state.loadProgress} loaded={this.state.vectorsLoaded} />
+        <div style={this.styles.editor}>
+          <Draft.Editor
+            editorState={this.state.editorState}
+            onChange={this.onChange.bind(this)}
+            handleKeyCommand={this.handleKeyCommand.bind(this)}
+            style={{height: "10px"}}
+          />
+          <Dropdown similarWords={this.state.similarWords} activeWordData={this.state.activeWordData} />
+        </div>
       </div>
     )
   }
@@ -241,7 +278,35 @@ class Dropdown extends React.Component {
       </div>
     )
   }
+}
 
+class StatusBar extends React.Component {
+
+  style = {
+    bar: {
+      backgroundColor: "#222",
+      fontFamily: "Sans-Serif",
+      height: "40px",
+      width: "100%",
+      color: "white",
+      display: "flex",
+      alignItems: "center",
+      paddingLeft: "25px",
+    }
+  }
+
+  constructor(props) {
+    super(props)
+  }
+  render () {
+    let doShowProgress = this.props.state[1] == 0
+    let progress = "(" + Math.round(this.props.progress * 100).toString() + "%)"
+    return (
+    <div style={this.style.bar}>
+      <div>{this.props.state[0] + " "} {doShowProgress && progress}</div>
+    </div>
+    )
+  }
 }
 
 ReactDOM.render(<App />, document.getElementById("root"))
