@@ -108,12 +108,13 @@ class App extends React.Component {
       width: "100%",
     },
     editor: {
-      top: "40px", //no flexbox support for Draft.js editor
+      height: "100%", //no flexbox support for Draft.js editor; as a component doesn't respond well to css.
+      marginTop: "-40px",
+      padding: "25px",
+      paddingTop: "65px",
       width: "100%",
-      height: "calc(100%-40px)",
       fontSize: 18,
       fontFamily: "Sans-Serif",
-      padding: "25px",
       boxSizing: "border-box",
     }
   }
