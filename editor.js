@@ -6,7 +6,6 @@ const vectorURL = "https://storage.googleapis.com/mlstorage-cloud/Data/glove.6B.
 //fetch doesn't have progress, file too big to not have indicator ==> xhr ugliness.
 function fetchWordVectors(onProgress) {
   return new Promise((resolve, reject) => {
-    localforage.setDriver(localforage.INDEXEDDB)
     localforage.getItem('vectorZip').then(zip => {
       if (zip == null) {
         var xhr = new XMLHttpRequest();
@@ -142,6 +141,7 @@ class App extends React.Component {
 
   constructor(props) {
     super(props)
+    localforage.setDriver(localforage.INDEXEDDB)
     tf.setBackend("cpu") //using webgl backend causes slight freeze after every big matrix op
     console.log("✓ Loaded react")
     let onProgress = loadProgress => {this.setState({loadProgress})}
@@ -158,16 +158,34 @@ class App extends React.Component {
           loadState: ["Ready", 3]
         })
       })
+
+    let savedEditor = localStorage.getItem("savedEditor")
+    if (savedEditor == null) {
+      console.log("✓ Creating empty Draft editor")
+      var newEditor = Draft.EditorState.createEmpty()
+    } else {
+      console.log("✓ Found saved Draft editor")
+      var newEditor = Draft.EditorState.createWithContent(Draft.convertFromRaw(JSON.parse(savedEditor)))
+    }
+
     this.state = {
-      editorState: Draft.EditorState.createEmpty(),
+      editorState: newEditor,
       activeWord: {text: "", blockKey: "", pos: null},
       similarWords: [],
       vectorsLoaded: false,
       wordDict: null,
       wordVectors: null,
       loadProgress: 0.0,
-      loadState: ["Downloading word vectors", 0]
+      loadState: ["Downloading word vectors", 0],
+      lastChange: Date.now(),
+      lastChangeTimeout: null,
     }
+
+    let save = () => {
+      let rawEditorState = JSON.stringify(Draft.convertToRaw(this.state.editorState.getCurrentContent()))
+      localStorage.setItem("savedEditor", rawEditorState)
+    }
+    setInterval(save, 2000)
   }
 
   handleKeyCommand(command, editorState) {
@@ -184,23 +202,35 @@ class App extends React.Component {
     this.setState((currentState, props) => {
       let word = this.getActiveWord(editorState)
       let wordText = word.text
-      let lastChange = editorState.getLastChangeType()
+      let lastChangeType = editorState.getLastChangeType()
 
-      let wasCharacterEdit = lastChange == 'insert-characters' || lastChange == 'backspace-character'
+      //force minimum time diff for calculation when backspacing.
+      let lastChangeTimeDiff = Date.now() - this.state.lastChange
+      let wasLongDelay = lastChangeTimeDiff > 20 || lastChangeType != 'backspace-character'
+      let lastChangeTimeout
+      if (!wasLongDelay) {
+        let updateEditor = () => {this.onChange(this.state.editorState)}
+        lastChangeTimeout = setTimeout(updateEditor, 20)
+      }
+      clearTimeout(this.state.lastChangeTimeout)
+
+      let wasCharacterEdit = lastChangeType == 'insert-characters' || lastChangeType == 'backspace-character'
       let wasSelectionChange = currentState.editorState.getCurrentContent() == editorState.getCurrentContent()
       let isNewWord = wordText != currentState.activeWord.text || word.blockKey != currentState.activeWord.blockKey
         || word.wordStart !=currentState.activeWord.wordStart
       let selectionExists = window.getSelection().rangeCount !=0
       let vectorAvailible = this.state.vectorsLoaded && wordText in this.state.wordDict.fromWord
 
-      if((wasCharacterEdit || wasSelectionChange) && isNewWord && selectionExists && vectorAvailible) {
+      if((wasCharacterEdit || wasSelectionChange) && isNewWord && selectionExists && vectorAvailible && wasLongDelay) {
         let cursor = window.getSelection().getRangeAt(0).getBoundingClientRect()
         let similarWords = this.getWordSuggestions(wordText)
         let wordDecorator = this.createSuggestionsDecorator(word.blockKey, word.wordStart, word.wordEnd, similarWords)
         return {
           editorState: Draft.EditorState.set(editorState, {decorator: wordDecorator}),
           activeWord: word,
-          similarWords
+          similarWords,
+          lastChange: Date.now(),
+          lastChangeTimeout
         }
       }
       else if (!isNewWord) {
@@ -209,8 +239,9 @@ class App extends React.Component {
       else {
         return {
           editorState: Draft.EditorState.set(editorState, {decorator: null}),
-          activeWord: word,
           similarWords: [],
+          lastChange: Date.now(),
+          lastChangeTimeout
         }
       }
     })
@@ -261,12 +292,10 @@ class App extends React.Component {
   componentDidUpdate() {
     let currentWord = document.getElementById("activeWord")
     let lastPos = this.state.activeWord.pos
-
     if (currentWord) {
       let pos = currentWord.getBoundingClientRect()
       if (lastPos == null || (pos.x != lastPos.x && pos.y != lastPos.y)) {
         this.setState({activeWord: {...this.state.activeWord, pos}})
-        console.log("updating pos")
       }
     }
     else if (!currentWord && lastPos != null) {
