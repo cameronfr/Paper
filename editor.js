@@ -103,12 +103,18 @@ function getHighestKIndices(array, k) {
 class App extends React.Component {
 
   styles = {
-    editor: {
-      width: "100%",
+    main: {
       height: "100%",
+      width: "100%",
+    },
+    editor: {
+      top: "40px", //no flexbox support for Draft.js editor
+      width: "100%",
+      height: "calc(100%-40px)",
       fontSize: 18,
       fontFamily: "Sans-Serif",
-      margin: "25px",
+      padding: "25px",
+      boxSizing: "border-box",
     }
   }
 
@@ -274,14 +280,14 @@ class App extends React.Component {
       var  y = this.state.activeWord.pos.y + 23
     }
     return (
-      <div style={{height: "100%", width: "100%"}}>
+      <div style={this.styles.main}>
         <StatusBar state={this.state.loadState} progress={this.state.loadProgress} loaded={this.state.vectorsLoaded} />
         <div style={this.styles.editor}>
           <Draft.Editor
             editorState={this.state.editorState}
             onChange={this.onChange.bind(this)}
             handleKeyCommand={this.handleKeyCommand.bind(this)}
-            style={{height: "10px"}}
+            style={{}}
           />
         </div>
         {doRenderDropdown && <Dropdown similarWords={this.state.similarWords} position={{x, y}}/>}
@@ -351,6 +357,7 @@ class StatusBar extends React.Component {
       display: "flex",
       alignItems: "center",
       paddingLeft: "25px",
+      boxSizing: "border-box",
     }
   }
 
