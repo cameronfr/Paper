@@ -64,8 +64,6 @@ async function loadWordVectors(zipArrayBuffer, onProgress) {
     for (var jdx in vector) {
       let feat = vector[jdx] / magnitude
       if (parseInt(idx) == 0) {
-        console.log(magnitude)
-        console.log(feat)
       }
       wordVectors.set(feat, parseInt(idx), parseInt(jdx))
     }
