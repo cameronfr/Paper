@@ -63,8 +63,6 @@ async function loadWordVectors(zipArrayBuffer, onProgress) {
 
     for (var jdx in vector) {
       let feat = vector[jdx] / magnitude
-      if (parseInt(idx) == 0) {
-      }
       wordVectors.set(feat, parseInt(idx), parseInt(jdx))
     }
 
@@ -201,12 +199,14 @@ class App extends React.Component {
 
   //su eyr ad
   onChange(editorState) {
+    if (editorState.getLastChangeType() == "apply-entity") return //prevent shenanigans when editing happens in decorator
+
     this.setState((currentState, props) => {
       let word = this.getActiveWord(editorState)
       let wordText = word.text
       let lastChangeType = editorState.getLastChangeType()
 
-      //force minimum time diff for calculation when backspacing.
+      // force minimum time diff for calculation when backspacing.
       let lastChangeTimeDiff = Date.now() - this.state.lastChange
       let wasLongDelay = lastChangeTimeDiff > 20 || lastChangeType != 'backspace-character'
       let lastChangeTimeout
@@ -220,11 +220,9 @@ class App extends React.Component {
       let wasSelectionChange = currentState.editorState.getCurrentContent() == editorState.getCurrentContent()
       let isNewWord = wordText != currentState.activeWord.text || word.blockKey != currentState.activeWord.blockKey
         || word.wordStart !=currentState.activeWord.wordStart
-      let selectionExists = window.getSelection().rangeCount !=0
       let vectorAvailible = this.state.vectorsLoaded && wordText in this.state.wordDict.fromWord
 
-      if((wasCharacterEdit || wasSelectionChange) && isNewWord && selectionExists && vectorAvailible && wasLongDelay) {
-        let cursor = window.getSelection().getRangeAt(0).getBoundingClientRect()
+      if((wasCharacterEdit || wasSelectionChange) && isNewWord && vectorAvailible && wasLongDelay) {
         let similarWords = this.getWordSuggestions(wordText)
         let wordDecorator = this.createSuggestionsDecorator(word.blockKey, word.wordStart, word.wordEnd, similarWords)
         return {
@@ -241,6 +239,7 @@ class App extends React.Component {
       else {
         return {
           editorState: Draft.EditorState.set(editorState, {decorator: null}),
+          activeWord: "",
           similarWords: [],
           lastChange: Date.now(),
           lastChangeTimeout
@@ -257,7 +256,7 @@ class App extends React.Component {
       let text = currentContentBlock.getText()
       let start = selectionState.getStartOffset()
       let end = selectionState.getEndOffset()
-      let wordStart = text.lastIndexOf(" ", start-1)
+      let wordStart = text.lastIndexOf(" ", start-1) + 1
       let wordEnd = text.indexOf(" ", start-1)
       let word
       if (start != end) {
@@ -266,7 +265,7 @@ class App extends React.Component {
       else {
         if (wordStart == -1) wordStart = 0
         if (wordEnd == -1) wordEnd = text.length
-        word = text.substring(wordStart, wordEnd).trim().toLowerCase()
+        word = text.substring(wordStart, wordEnd).toLowerCase()
       }
       return {text: word, blockKey, wordStart, wordEnd}
   }
@@ -390,6 +389,7 @@ class StatusBar extends React.Component {
       alignItems: "center",
       paddingLeft: "25px",
       boxSizing: "border-box",
+      boxShadow: "0px 1px 3px #ccc",
     }
   }
 
