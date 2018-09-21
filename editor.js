@@ -59,10 +59,14 @@ async function loadWordVectors(zipArrayBuffer, onProgress) {
     wordDict.fromIdx[parseInt(idx)] = word
     wordDict.fromWord[word] = idx
 
-    let magnitude = Math.sqrt(vector.reduce((acc, x) => acc + x*x))
+    let magnitude = Math.sqrt(vector.reduce((acc, x) => acc + Math.pow(x, 2), 0.0))
 
     for (var jdx in vector) {
       let feat = vector[jdx] / magnitude
+      if (parseInt(idx) == 0) {
+        console.log(magnitude)
+        console.log(feat)
+      }
       wordVectors.set(feat, parseInt(idx), parseInt(jdx))
     }
 
