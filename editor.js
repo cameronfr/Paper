@@ -1,4 +1,4 @@
-// Cameron Franz, September 2018.
+// cfz, September 2018.
 // TODO: novelty, 200ms wait before search to reduce lag, aesthetics, cleaning up word results.
 
 const vectorURL = "https://storage.googleapis.com/mlstorage-cloud/Data/glove.6B.50d.txt.zip"
@@ -295,6 +295,7 @@ class App extends React.Component {
     let lastPos = this.state.activeWord.pos
     if (currentWord) {
       let pos = currentWord.getBoundingClientRect()
+      pos.y += window.scrollY
       if (lastPos == null || (pos.x != lastPos.x && pos.y != lastPos.y)) {
         this.setState({activeWord: {...this.state.activeWord, pos}})
       }
