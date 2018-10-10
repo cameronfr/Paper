@@ -256,7 +256,7 @@ class App extends React.Component {
       let text = currentContentBlock.getText()
       let start = selectionState.getStartOffset()
       let end = selectionState.getEndOffset()
-      let wordStart = text.lastIndexOf(" ", start-1) + 1
+      let wordStart = text.lastIndexOf(" ", start-2) + 1
       let wordEnd = text.indexOf(" ", start-1)
       let word
       if (start != end) {
