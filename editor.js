@@ -101,6 +101,8 @@ function getHighestKIndices(array, k) {
 
 class App extends React.Component {
 
+  welcomeText = "To get started, just type!\n\nYou can bold and italicize with cmd-B and cmd-I.\n\nOnce the word vectors have initialized, word suggestions will appear as you type.\n\nProgress is saved instantly to the app - your text will be here when you come back."
+
   styles = {
     main: {
       height: "100%",
@@ -141,6 +143,13 @@ class App extends React.Component {
 
   constructor(props) {
     super(props)
+    this.blockstackSession = new blockstack.UserSession()
+    if(!this.blockstackSession.isUserSignedIn() && this.blockstackSession.isSignInPending()) {
+       this.blockstackSession.handlePendingSignIn().then(userData => {
+         console.log("✓ Logged in as " + userData.username)
+       })
+     }
+
     localforage.setDriver(localforage.INDEXEDDB)
     tf.setBackend("cpu") //using webgl backend causes slight freeze after every big matrix op
     console.log("✓ Loaded react")
@@ -162,7 +171,8 @@ class App extends React.Component {
     let savedEditor = localStorage.getItem("savedEditor")
     if (savedEditor == null) {
       console.log("✓ Creating empty Draft editor")
-      var newEditor = Draft.EditorState.createEmpty()
+      // var newEditor = Draft.EditorState.createEmpty()
+      var newEditor = Draft.EditorState.createWithContent(Draft.ContentState.createFromText(this.welcomeText))
     } else {
       console.log("✓ Found saved Draft editor")
       var newEditor = Draft.EditorState.createWithContent(Draft.convertFromRaw(JSON.parse(savedEditor)))
@@ -175,6 +185,7 @@ class App extends React.Component {
       vectorsLoaded: false,
       wordDict: null,
       wordVectors: null,
+      userData: null,
       loadProgress: 0.0,
       loadState: ["Downloading word vectors", 0],
       lastChange: Date.now(),
@@ -197,22 +208,23 @@ class App extends React.Component {
     return 'not-handled';
   }
 
-  //su eyr ad
   onChange(editorState) {
     if (editorState.getLastChangeType() == "apply-entity") return //prevent shenanigans when editing happens in decorator
 
     this.setState((currentState, props) => {
       let word = this.getActiveWord(editorState)
-      let wordText = word.text
+      let wordText = word.text && word.text.replace(",", "")
+      wordText = wordText && wordText.replace(".", "")
       let lastChangeType = editorState.getLastChangeType()
 
       // force minimum time diff for calculation when backspacing.
       let lastChangeTimeDiff = Date.now() - this.state.lastChange
-      let wasLongDelay = lastChangeTimeDiff > 20 || lastChangeType != 'backspace-character'
+      // console.log(lastChangeTimeDiff)
+      let wasLongDelay = lastChangeTimeDiff > 145// || lastChangeType != 'backspace-character'
       let lastChangeTimeout
       if (!wasLongDelay) {
         let updateEditor = () => {this.onChange(this.state.editorState)}
-        lastChangeTimeout = setTimeout(updateEditor, 20)
+        lastChangeTimeout = setTimeout(updateEditor, 150)
       }
       clearTimeout(this.state.lastChangeTimeout)
 
@@ -223,12 +235,19 @@ class App extends React.Component {
       let vectorAvailible = this.state.vectorsLoaded && wordText in this.state.wordDict.fromWord
 
       if((wasCharacterEdit || wasSelectionChange) && isNewWord && vectorAvailible && wasLongDelay) {
-        let similarWords = this.getWordSuggestions(wordText)
-        let wordDecorator = this.createSuggestionsDecorator(word.blockKey, word.wordStart, word.wordEnd, similarWords)
+        this.getWordSuggestions(wordText).then(similarWords => {
+          let wordDecorator = this.createSuggestionsDecorator(word.blockKey, word.wordStart, word.wordEnd, similarWords) //doing the update async didn't help freezing up
+          this.setState((currentState, props) => {
+            return {
+              editorState: Draft.EditorState.set(currentState.editorState, {decorator: wordDecorator}),
+              similarWords,
+            }
+          })
+        })
         return {
-          editorState: Draft.EditorState.set(editorState, {decorator: wordDecorator}),
+          editorState: Draft.EditorState.set(editorState, {decorator: null}),
           activeWord: word,
-          similarWords,
+          // similarWords,
           lastChange: Date.now(),
           lastChangeTimeout
         }
@@ -240,7 +259,7 @@ class App extends React.Component {
         return {
           editorState: Draft.EditorState.set(editorState, {decorator: null}),
           activeWord: "",
-          similarWords: [],
+          // similarWords: [],
           lastChange: Date.now(),
           lastChangeTimeout
         }
@@ -270,10 +289,10 @@ class App extends React.Component {
       return {text: word, blockKey, wordStart, wordEnd}
   }
 
-  getWordSuggestions(word) {
+  async getWordSuggestions(word) {
     //make word vector
     let wordIndex = this.state.wordDict.fromWord[word]
-    let wordVectorsBuffer = this.state.wordVectors.buffer()
+    let wordVectorsBuffer = await this.state.wordVectors.buffer()
     let vectorLength = this.state.wordVectors.shape[1]
     let vector = tf.buffer([vectorLength, 1], "float32")
     for (var idx = 0; idx < this.state.wordVectors.shape[1]; idx++) {
@@ -282,12 +301,15 @@ class App extends React.Component {
     vector = vector.toTensor()
     //get similarities
     let similarities = tf.matMul(this.state.wordVectors, vector)
-    let similarityData = similarities.dataSync()
+    let similarityData = await similarities.data()
     similarities.dispose()
     vector.dispose()
     let similarWordIndexes = getHighestKIndices(similarityData, 10)
     let similarWords = similarWordIndexes.map(x => this.state.wordDict.fromIdx[x])
     return similarWords
+  }
+
+  componentDidMount() {
   }
 
   componentDidUpdate() {
@@ -311,9 +333,9 @@ class App extends React.Component {
       var x = this.state.activeWord.pos.x
       var  y = this.state.activeWord.pos.y + 23
     }
-    return (
+    var mainAppArea = (
       <div style={this.styles.main}>
-        <StatusBar state={this.state.loadState} progress={this.state.loadProgress} loaded={this.state.vectorsLoaded} />
+        <StatusBar state={this.state.loadState} progress={this.state.loadProgress} loaded={this.state.vectorsLoaded} logout={() => this.blockstackSession.signUserOut()} />
         <div style={this.styles.editor}>
           <Draft.Editor
             editorState={this.state.editorState}
@@ -324,6 +346,10 @@ class App extends React.Component {
         </div>
         {doRenderDropdown && <Dropdown similarWords={this.state.similarWords} position={{x, y}}/>}
       </div>
+    )
+
+    return (
+      this.blockstackSession.isUserSignedIn() ? mainAppArea : <LandingPage/>
     )
   }
 }
@@ -387,11 +413,29 @@ class StatusBar extends React.Component {
       width: "100%",
       color: "white",
       display: "flex",
+      flexDirection: "row",
+      justifyContent: "space-between",
       alignItems: "center",
       paddingLeft: "25px",
+      paddingRight: "25px",
       boxSizing: "border-box",
+      fontSize: "16px",
       boxShadow: "0px 1px 3px #ccc",
     }
+  }
+
+  buttonStyle = {
+    color: "white",
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    borderRadius: "2px 2px 2px 2px",
+    fontSize: "16px",
+    borderColor: "#000",
+    padding: "4 6",
+    cursor: "pointer",
+    borderWidth: "1px 1px 1px 1px",
+    borderStyle: "solid",
+    borderColor: "white"
+    // width: "67px",
   }
 
   constructor(props) {
@@ -403,6 +447,124 @@ class StatusBar extends React.Component {
     return (
       <div style={this.style.bar}>
         <div>{this.props.state[0] + " "} {doShowProgress && progress}</div>
+        <div><button style={this.buttonStyle} onClick={() => this.props.logout()}>Logout</button></div>
+      </div>
+    )
+  }
+}
+
+class LandingPage extends React.Component {
+
+  appConfig = new blockstack.AppConfig(['store_write'])
+
+  exampleStyle = {
+    sentence: {
+      fontSize: "24px",
+      fontFamily: "sans-serif",
+    },
+    dropdown: {
+      fontFamily: "Sans-Serif",
+      borderRadius: "7px",
+      boxShadow: "0px 1px 4px #ccc",
+      // overflow: "hidden",
+      backgroundColor: "white",
+      zIndex: 100,
+      marginTop: "1.9em",
+      position: "relative",
+      left: "-3.8em",
+      marginRight: "-3.8em",
+      // MozUserSelect:"none",
+      // WebkitUserSelect:"none",
+    },
+    list: {
+      listStyle: "none",
+      padding: 0,
+      margin: 0,
+      fontSize: 20,
+      boxSizing: "border-box",
+    },
+    item: {
+      marginBottom: "-1px",
+      borderBottom: "1px solid #ccc",
+      padding: "4px",
+      paddingLeft: "6px",
+      paddingRight: "6px",
+    }
+  }
+
+  headerStyle = {
+    fontFamily: "LyonDisplay,Georgia,serif",
+    fontSize: "60px",
+    marginBottom: "0px",
+    marginTop: "20px",
+    // letterSpacing: "0.01em",
+  }
+
+  buttonStyle = {
+    fontFamily: "LyonDisplay,Georgia,serif",
+    color: "black",
+    fontSize: "24px",
+    backgroundColor: "white",
+    borderRadius: "2px 2px 2px 2px",
+    borderColor: "#000",
+    padding: "15 30",
+    cursor: "pointer",
+    borderWidth: "1px 1px 1px 1px",
+    borderStyle: "solid",
+    // width: "67px",
+  }
+
+  constructor(props) {
+    super(props)
+    this.userSession = new blockstack.UserSession({appConfig: this.appConfig})
+    this.state = {
+      blink: true,
+    }
+    setTimeout(() => this.toggleBlink(), 500)
+  }
+
+  signin() {
+    this.userSession.redirectToSignIn()
+  }
+
+  toggleBlink() {
+    this.setState(oldState => {return {blink: !oldState.blink}})
+    setTimeout(() => this.toggleBlink(), 500)
+  }
+
+  render() {
+    return (
+      <div style={{display: "flex", flexDirection: "column", alignItems:"center", boxSizing: "border-box", margin: "20px"}}>
+        <h1 style={this.headerStyle}>Prosepaper</h1>
+
+        <div style={{display: "flex", flexDirection: "row", marginTop: "130px", marginBottom: "120px"}}>
+
+          <div style={this.exampleStyle.sentence}>A word processor that actually knows a bit about words <span style={{color: this.state.blink ? "black" : "white"}}>|</span>
+          <br></br><br></br><br></br><br></br><br></br><br></br>
+
+
+          </div>
+
+          <div style={this.exampleStyle.dropdown}>
+            <ul style={this.exampleStyle.list}>
+              <div><li style={this.exampleStyle.item}>phrases</li></div>
+              <div><li style={this.exampleStyle.item}>uttered</li></div>
+              <div><li style={this.exampleStyle.item}>language</li></div>
+              <div><li style={this.exampleStyle.item}>expression</li></div>
+              <div><li style={this.exampleStyle.item}>letters</li></div>
+              <div><li style={this.exampleStyle.item}>write</li></div>
+              <div><li style={this.exampleStyle.item}>text</li></div>
+              <div><li style={this.exampleStyle.item}>references</li></div>
+              <div><li style={this.exampleStyle.item}>describes</li></div>
+              <div><li style={this.exampleStyle.item}>meaning</li></div>
+            </ul>
+          </div>
+
+        </div>
+
+        <div style={{...this.exampleStyle.sentence, fontFamily: "LyonDisplay,Georgia,serif", marginBottom: "60px"}}><b>Get realtime word suggestions while typing</b></div>
+        <button style={this.buttonStyle} onClick={() => this.signin()}>Sign in with Blockstack
+        </button>
       </div>
     )
   }
