@@ -1,0 +1,10 @@
+{
+  "name": "Prosepaper",
+  "start_url": "./index.html",
+  "description": "A modern word processor",
+  "icons": [{
+    "src": "https://prosepaper.colorsleep.com/scroll.png",
+    "sizes": "320x320",
+    "type": "image/png"
+  }]
+}
