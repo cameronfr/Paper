@@ -40,8 +40,14 @@ function sleep(ms) {
 }
 
 async function loadWordVectors(zipArrayBuffer, onProgress) {
+  var seconds = 0
+  var unzipProgress = setInterval(() => {
+    seconds = seconds < 50 ? seconds + 1 : seconds
+    onProgress(seconds / 100.0) // simulate ZIP loading progress
+  }, 140)
   let text = await JSZip.loadAsync(zipArrayBuffer).then(res => res.files["glove.6B.50d.txt"].async("string"))
     .catch(err => console.log("✗ Error unzipping vector file:\n" + err))
+  clearInterval(unzipProgress)
 
   let lines = text.split("\n")
   lines = lines.slice(0, -1)
@@ -67,7 +73,7 @@ async function loadWordVectors(zipArrayBuffer, onProgress) {
     }
 
     if (idx % Math.floor(lines.length / 100) == 0) {
-      onProgress(parseInt(idx)/lines.length)
+      onProgress(0.5*(parseInt(idx)/lines.length)+0.5)
       await sleep(1) //react needs a frame to render or something like that
     }
   }
@@ -100,6 +106,63 @@ function getHighestKIndices(array, k) {
 }
 
 class App extends React.Component {
+
+  appConfig = new blockstack.AppConfig(['store_write', 'publish_data'])
+
+  constructor(props) {
+    super(props)
+    this.blockstackSession = new blockstack.UserSession({appConfig: this.appConfig})
+    var pending = false
+    var signedIn = false
+
+    if(this.blockstackSession.isUserSignedIn()) {
+      signedIn = true
+    }
+    else if(!this.blockstackSession.isUserSignedIn() && this.blockstackSession.isSignInPending()) {
+      signedIn = false
+      pending = true
+      this.blockstackSession.handlePendingSignIn().then(userData => {
+        console.log("✓ Logged in as " + userData.username)
+        this.setState({signedIn: true, pending: false})
+       })
+     }
+
+     this.state = {
+       pending,
+       signedIn,
+     }
+  }
+
+  signOut() {
+    this.blockstackSession.signUserOut()
+    this.setState({signedIn: false, pending: true})
+    setInterval(() => this.setState({pending: false}), 3000) //there's no signUserOut() promise, so wait for sign out to happen.
+  }
+
+  render() {
+    var signedIn = this.state.signedIn
+    var pending = this.state.pending
+    console.log(this.state)
+
+    var displayItem
+    if (pending) {
+      displayItem = <LoadingPage />
+    }
+    else if (signedIn) {
+      displayItem = <Editor blockstackSession={this.blockstackSession} signOut={() => this.signOut()}/>
+    }
+    else {
+      displayItem = <LandingPage signIn={() => this.blockstackSession.redirectToSignIn()}/>
+    }
+
+    return (
+      displayItem
+    )
+  }
+
+}
+
+class Editor extends React.Component {
 
   welcomeText = "To get started, just type!\n\nYou can bold and italicize with cmd-B and cmd-I.\n\nOnce the word vectors have initialized, word suggestions will appear as you type.\n\nProgress is saved instantly to the app - your text will be here when you come back."
 
@@ -143,16 +206,8 @@ class App extends React.Component {
 
   constructor(props) {
     super(props)
-    this.blockstackSession = new blockstack.UserSession()
-    if(!this.blockstackSession.isUserSignedIn() && this.blockstackSession.isSignInPending()) {
-       this.blockstackSession.handlePendingSignIn().then(userData => {
-         console.log("✓ Logged in as " + userData.username)
-       })
-     }
 
-    localforage.setDriver(localforage.INDEXEDDB)
     tf.setBackend("cpu") //using webgl backend causes slight freeze after every big matrix op
-    console.log("✓ Loaded react")
     let onProgress = loadProgress => {this.setState({loadProgress})}
 
     fetchWordVectors(onProgress)
@@ -168,18 +223,25 @@ class App extends React.Component {
         })
       })
 
-    let savedEditor = localStorage.getItem("savedEditor")
-    if (savedEditor == null) {
-      console.log("✓ Creating empty Draft editor")
-      // var newEditor = Draft.EditorState.createEmpty()
-      var newEditor = Draft.EditorState.createWithContent(Draft.ContentState.createFromText(this.welcomeText))
-    } else {
-      console.log("✓ Found saved Draft editor")
-      var newEditor = Draft.EditorState.createWithContent(Draft.convertFromRaw(JSON.parse(savedEditor)))
+    if (!this.props.blockstackSession.isUserSignedIn()) {
+      console.log("ERROR: User not signed in, but should be")
     }
 
+    const options = {decrypt: true}
+    let savedEditor = this.props.blockstackSession.getFile("savedEditor", options).then(savedEditor => {
+      if (savedEditor == null) {
+        console.log("✓ Creating empty Draft editor")
+        var newEditor = Draft.EditorState.createWithContent(Draft.ContentState.createFromText(this.welcomeText))
+      } else {
+        console.log("✓ Found saved Draft editor")
+        var newEditor = Draft.EditorState.createWithContent(Draft.convertFromRaw(JSON.parse(savedEditor)))
+      }
+      this.setState({editorState: newEditor, finishedDownloadingEditorState: true})
+    })
+
     this.state = {
-      editorState: newEditor,
+      editorState: null,
+      finishedDownloadingEditorState: false,
       activeWord: {text: "", blockKey: "", pos: null},
       similarWords: [],
       vectorsLoaded: false,
@@ -192,11 +254,14 @@ class App extends React.Component {
       lastChangeTimeout: null,
     }
 
-    let save = () => {
+    let save = async () => {
+      this.state.vectorsLoaded && this.setState({loadState: ["Saving", 2]})
       let rawEditorState = JSON.stringify(Draft.convertToRaw(this.state.editorState.getCurrentContent()))
-      localStorage.setItem("savedEditor", rawEditorState)
+      const options = {encrypt: true}
+      await this.props.blockstackSession.putFile("savedEditor", rawEditorState, options)
+      this.state.vectorsLoaded && this.setState({loadState: ["Saved", 2]})
     }
-    setInterval(save, 2000)
+    setInterval(() => this.state.finishedDownloadingEditorState && save(), 10 * 1000)
   }
 
   handleKeyCommand(command, editorState) {
@@ -333,23 +398,19 @@ class App extends React.Component {
       var x = this.state.activeWord.pos.x
       var  y = this.state.activeWord.pos.y + 23
     }
-    var mainAppArea = (
+    return (
       <div style={this.styles.main}>
-        <StatusBar state={this.state.loadState} progress={this.state.loadProgress} loaded={this.state.vectorsLoaded} logout={() => this.blockstackSession.signUserOut()} />
+        <StatusBar state={this.state.loadState} progress={this.state.loadProgress} loaded={this.state.vectorsLoaded} logout={() => this.props.signOut()} />
         <div style={this.styles.editor}>
-          <Draft.Editor
+          {this.state.finishedDownloadingEditorState && <Draft.Editor
             editorState={this.state.editorState}
             onChange={this.onChange.bind(this)}
             handleKeyCommand={this.handleKeyCommand.bind(this)}
             style={{}}
-          />
+          />}
         </div>
         {doRenderDropdown && <Dropdown similarWords={this.state.similarWords} position={{x, y}}/>}
       </div>
-    )
-
-    return (
-      this.blockstackSession.isUserSignedIn() ? mainAppArea : <LandingPage/>
     )
   }
 }
@@ -455,8 +516,6 @@ class StatusBar extends React.Component {
 
 class LandingPage extends React.Component {
 
-  appConfig = new blockstack.AppConfig(['store_write'])
-
   exampleStyle = {
     sentence: {
       fontSize: "24px",
@@ -516,15 +575,10 @@ class LandingPage extends React.Component {
 
   constructor(props) {
     super(props)
-    this.userSession = new blockstack.UserSession({appConfig: this.appConfig})
     this.state = {
       blink: true,
     }
     setTimeout(() => this.toggleBlink(), 500)
-  }
-
-  signin() {
-    this.userSession.redirectToSignIn()
   }
 
   toggleBlink() {
@@ -563,11 +617,83 @@ class LandingPage extends React.Component {
         </div>
 
         <div style={{...this.exampleStyle.sentence, fontFamily: "LyonDisplay,Georgia,serif", marginBottom: "60px"}}><b>Get realtime word suggestions while typing</b></div>
-        <button style={this.buttonStyle} onClick={() => this.signin()}>Sign in with Blockstack
+        <button style={this.buttonStyle} onClick={() => this.props.signIn()}>Sign in with Blockstack
         </button>
       </div>
     )
   }
 }
+
+class LoadingPage extends React.Component {
+  constructor(props) {
+    super(props)
+  }
+
+  render() {
+    return (
+      <div style={{display: "flex", justifyContent:"center", alignItems:"center", width:"100%", height:"100%"}}>
+        <LoadingIndicator isLoading={true}/>
+      </div>
+    )
+  }
+
+}
+
+class LoadingIndicator extends React.Component {
+
+	containerStyle = {
+		display: "flex",
+		justifyContent: "center",
+		alignItems: "center",
+		backgroundColor:"white",
+		borderRadius:"50%",
+		height:"30px",
+		width:"30px",
+		cursor: "pointer",
+	}
+
+  constructor(props) {
+    super(props)
+    this.iconRef = React.createRef()
+  }
+
+  updateAnimation() {
+    if (this.props.isLoading) {
+      this.iconRef.current.style.animationPlayState = "running"
+    }
+    else {
+      this.iconRef.current.style.animationPlayState = "paused"
+    }
+  }
+
+  componentDidMount() {
+    this.iconRef.current.style.animation = "rotating 0.5s linear infinite"
+    this.updateAnimation()
+  }
+  componentDidUpdate() {
+    this.updateAnimation()
+  }
+
+  render() {
+    var active = true
+    return (
+      <div ref={this.iconRef} style={this.containerStyle}>
+        <div author="Loading icon by aurer: https://codepen.io/aurer/pen/jEGbA" title="0">
+          <svg version="1.1" id="loader-1" x="0px" y="0px"
+           width="30px" height="30px" viewBox="0 0 40 40" enableBackground="new 0 0 40 40" space="preserve">
+            <path opacity="0.2" fill="#000" d="M20.201,5.169c-8.254,0-14.946,6.692-14.946,14.946c0,8.255,6.692,14.946,14.946,14.946
+              s14.946-6.691,14.946-14.946C35.146,11.861,28.455,5.169,20.201,5.169z M20.201,31.749c-6.425,0-11.634-5.208-11.634-11.634
+              c0-6.425,5.209-11.634,11.634-11.634c6.425,0,11.633,5.209,11.633,11.634C31.834,26.541,26.626,31.749,20.201,31.749z"/>
+            <path fill="#000" d="M26.013,10.047l1.654-2.866c-2.198-1.272-4.743-2.012-7.466-2.012h0v3.312h0
+              C22.32,8.481,24.301,9.057,26.013,10.047z">
+            </path>
+          </svg>
+        </div>
+      </div>
+    )
+  }
+
+}
+
 
 ReactDOM.render(<App />, document.getElementById("root"))
