@@ -107,7 +107,7 @@ function getHighestKIndices(array, k) {
 
 class App extends React.Component {
 
-  appConfig = new blockstack.AppConfig(['store_write', 'publish_data'])
+  appConfig = new blockstack.AppConfig(['store_write'])
 
   constructor(props) {
     super(props)
@@ -167,10 +167,6 @@ class Editor extends React.Component {
   welcomeText = "To get started, just type!\n\nYou can bold and italicize with cmd-B and cmd-I.\n\nOnce the word vectors have initialized, word suggestions will appear as you type.\n\nProgress is saved instantly to the app - your text will be here when you come back."
 
   styles = {
-    main: {
-      height: "100%",
-      width: "100%",
-    },
     editor: {
       height: "100%", //no flexbox support for Draft.js editor; as a component doesn't respond well to css.
       marginTop: "-40px",
@@ -399,7 +395,8 @@ class Editor extends React.Component {
       var  y = this.state.activeWord.pos.y + 23
     }
     return (
-      <div style={this.styles.main}>
+      <div style={{height: "100%", width: "100%", display: "flex", justifyContent: "center"}}>
+      <div style={{width: "100%", maxWidth: "900px"}}>
         <StatusBar state={this.state.loadState} progress={this.state.loadProgress} loaded={this.state.vectorsLoaded} logout={() => this.props.signOut()} />
         <div style={this.styles.editor}>
           {this.state.finishedDownloadingEditorState && <Draft.Editor
@@ -410,6 +407,7 @@ class Editor extends React.Component {
           />}
         </div>
         {doRenderDropdown && <Dropdown similarWords={this.state.similarWords} position={{x, y}}/>}
+      </div>
       </div>
     )
   }
@@ -433,7 +431,7 @@ class Dropdown extends React.Component {
       listStyle: "none",
       padding: 0,
       margin: 0,
-      fontSize: 15,
+      fontSize: 18,//15
       boxSizing: "border-box",
     },
     item: {
@@ -470,18 +468,19 @@ class StatusBar extends React.Component {
     bar: {
       backgroundColor: "#222",
       fontFamily: "Sans-Serif",
-      height: "40px",
+      height: "50px",
       width: "100%",
       color: "white",
       display: "flex",
       flexDirection: "row",
       justifyContent: "space-between",
       alignItems: "center",
-      paddingLeft: "25px",
-      paddingRight: "25px",
+      paddingLeft: "10px",
+      paddingRight: "12px",
       boxSizing: "border-box",
-      fontSize: "16px",
+      fontSize: "16px",//"16px",
       boxShadow: "0px 1px 3px #ccc",
+
     }
   }
 
@@ -499,6 +498,19 @@ class StatusBar extends React.Component {
     // width: "67px",
   }
 
+  statusStyle = {
+    color: "white",
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    fontSize: "16px",
+    borderRadius: "2px 2px 2px 2px",
+    borderColor: "#000",
+    padding: "4 6",
+    borderWidth: "0px",
+    // borderWidth: "1px 1px 1px 1px",
+    borderStyle: "solid",
+    borderColor: "white"
+  }
+
   constructor(props) {
     super(props)
   }
@@ -507,7 +519,7 @@ class StatusBar extends React.Component {
     let progress = "(" + Math.round(this.props.progress * 100).toString() + "%)"
     return (
       <div style={this.style.bar}>
-        <div>{this.props.state[0] + " "} {doShowProgress && progress}</div>
+        <div><button style={this.statusStyle}>{this.props.state[0] + " "} {doShowProgress && progress}</button></div>
         <div><button style={this.buttonStyle} onClick={() => this.props.logout()}>Logout</button></div>
       </div>
     )
