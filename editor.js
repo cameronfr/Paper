@@ -1,7 +1,10 @@
 // cfz, September 2018.
 // TODO: novelty, 200ms wait before search to reduce lag, aesthetics, cleaning up word results.
 
-const vectorURL = "https://storage.googleapis.com/mlstorage-cloud/Data/glove.6B.50d.txt.zip"
+const API_URL = "https://asia-northeast1-traininggpu.cloudfunctions.net/GutenBert"
+const API_HELPER_URL = "https://asia-northeast1-traininggpu.cloudfunctions.net/GutenBertHelper"
+
+const VECTOR_URL = "https://storage.googleapis.com/mlstorage-cloud/Data/glove.6B.50d.txt.zip"
 
 //fetch doesn't have progress, file too big to not have indicator ==> xhr ugliness.
 function fetchWordVectors(onProgress) {
@@ -9,7 +12,7 @@ function fetchWordVectors(onProgress) {
     localforage.getItem('vectorZip').then(zip => {
       if (zip == null) {
         var xhr = new XMLHttpRequest();
-        xhr.open("GET", vectorURL, true);
+        xhr.open("GET", VECTOR_URL, true);
         xhr.responseType = "arraybuffer";
         xhr.onerror = (e) => {
           console.log("✗ Error fetching vector file:\n" + xhr.statusText)
@@ -105,6 +108,29 @@ function getHighestKIndices(array, k) {
   return highestValues
 }
 
+var fetchFromServer = (url, body) => {
+	return fetch(url, {
+		method: "POST",
+		mode: "cors",
+		headers: {"Content-Type": "application/json"},
+		body: JSON.stringify(body)
+	}).then(res => res.json())
+}
+
+var exampleQueries = [
+	"cooking a stew",
+	"cooking a stew for the family",
+	"trees were dancing in the wind",
+	"\"I never want to see you again\"",
+	"looking for inspiration for his next project",
+	"walking through the tall trees",
+	"they were harvesting apples for cider",
+	"the fire crackled as we sat around it telling stories",
+	"a fire engulfing the house",
+	"hi there",
+	"are we alone in the universe?"
+]
+
 class App extends React.Component {
 
   appConfig = new blockstack.AppConfig(['store_write'])
@@ -168,11 +194,9 @@ class Editor extends React.Component {
 
   styles = {
     editor: {
-      height: "100%", //no flexbox support for Draft.js editor; as a component doesn't respond well to css.
-      marginTop: "-40px",
       padding: "25px",
-      paddingTop: "65px",
       width: "100%",
+      height: "100%",
       fontSize: 18,
       fontFamily: "Sans-Serif",
       boxSizing: "border-box",
@@ -203,14 +227,18 @@ class Editor extends React.Component {
   constructor(props) {
     super(props)
 
-    tf.setBackend("cpu") //using webgl backend causes slight freeze after every big matrix op
     let onProgress = loadProgress => {this.setState({loadProgress})}
 
-    fetchWordVectors(onProgress)
+    // tf.setBackend("cpu") //using webgl backend causes slight freeze after every big matrix op
+    // Disable vectors for now
+
+    tf.setBackend('wasm')
+      .then(() => fetchWordVectors(onProgress))
       .then(buffer => {
         this.setState({loadState: ["Loading word vectors", 1], loadProgress: 0})
         return loadWordVectors(buffer, onProgress)
-      }).then((wordData) => {
+      })
+      .then((wordData) => {
         this.setState({
           wordVectors: wordData[0],
           wordDict: wordData[1],
@@ -245,9 +273,18 @@ class Editor extends React.Component {
       wordVectors: null,
       userData: null,
       loadProgress: 0.0,
-      loadState: ["Downloading word vectors", 0],
+      loadState: ["Downloading word vectors", 0], //disabling word vectors for now
+      // loadState: ["Ready", 2],
       lastChange: Date.now(),
       lastChangeTimeout: null,
+
+			textUnits: [],
+			isWaitingForResults: false,
+			searchText: "",
+			errorMessage: "",
+			examplePlaceholder: this.examplePlaceholder(),
+      previousSentence: "",
+      sentenceResultsCache: {},
     }
 
     let save = async () => {
@@ -270,22 +307,46 @@ class Editor extends React.Component {
   }
 
   onChange(editorState) {
+    //Todo: editorState update only handled by second setState
     if (editorState.getLastChangeType() == "apply-entity") return //prevent shenanigans when editing happens in decorator
 
+    //Below is book engine search updating logic
+    this.setState((currentState, props) => {
+      let activeSentence = this.getActiveSentence(editorState)
+      let wasSelectionChange = currentState.editorState.getCurrentContent() == editorState.getCurrentContent() && currentState.editorState.getSelection() != editorState.getSelection() && editorState.getSelection().getHasFocus()
+      let wasNewSentence = activeSentence.length == 1
+      let wasNewParagraph = editorState.getLastChangeType() == "split-block" && !wasSelectionChange
+
+      var newState = {}
+
+      if (wasSelectionChange) {
+        this.search(activeSentence)
+        newState = {...newState, searchText: activeSentence}
+      }
+      else if (wasNewSentence || wasNewParagraph) {
+        this.search(this.state.previousSentence)
+        newState = {...newState, searchText: this.state.previousSentence}
+      }
+
+      return {...newState, previousSentence: activeSentence}
+
+    })
+
+    //Below is word-vector suggestion updating logic
     this.setState((currentState, props) => {
       let word = this.getActiveWord(editorState)
       let wordText = word.text && word.text.replace(",", "")
       wordText = wordText && wordText.replace(".", "")
       let lastChangeType = editorState.getLastChangeType()
 
-      // force minimum time diff for calculation when backspacing.
+      //only display suggestions after a 150ms pause.
       let lastChangeTimeDiff = Date.now() - this.state.lastChange
-      // console.log(lastChangeTimeDiff)
-      let wasLongDelay = lastChangeTimeDiff > 145// || lastChangeType != 'backspace-character'
+      const delayBeforeDisplay = 150//150
+      let wasLongDelay = lastChangeTimeDiff > delayBeforeDisplay - 5// || lastChangeType != 'backspace-character'
       let lastChangeTimeout
       if (!wasLongDelay) {
         let updateEditor = () => {this.onChange(this.state.editorState)}
-        lastChangeTimeout = setTimeout(updateEditor, 150)
+        lastChangeTimeout = setTimeout(updateEditor, delayBeforeDisplay)
       }
       clearTimeout(this.state.lastChangeTimeout)
 
@@ -350,6 +411,59 @@ class Editor extends React.Component {
       return {text: word, blockKey, wordStart, wordEnd}
   }
 
+  getActiveSentence(editorState) {
+      let selectionState = editorState.getSelection()
+      let blockKey = selectionState.getAnchorKey()
+      let currentContent = editorState.getCurrentContent();
+      let currentContentBlock = currentContent.getBlockForKey(blockKey);
+      let text = currentContentBlock.getText()
+      let start = selectionState.getStartOffset()
+      let wordStart = text.lastIndexOf(" ", start-2) + 1
+
+      const cursorCharacter = "$$$^$$$" //since compromise.js (nlp(...) obj) does not support char pos
+      text = text.slice(0, wordStart) + cursorCharacter + " " + text.slice(wordStart, text.length)
+      let nlpResult = nlp(text)
+      let sentences = nlpResult.sentences().list
+      for (let sent of sentences) {
+        if (cursorCharacter in sent.cache.words) {
+          return sent.text().replace(cursorCharacter + " ", "")
+        }
+      }
+      return null
+  }
+
+	search(searchText) {
+		this.setState({isWaitingForResults: true})
+		this.setState({examplePlaceholder: this.examplePlaceholder()})
+    if (searchText in this.state.sentenceResultsCache) {
+  			this.setState({
+          textUnits: this.state.sentenceResultsCache[searchText],
+          error: "",
+          isWaitingForResults: false,
+        })
+    }
+    else {
+  		fetchFromServer(API_URL, {"sentence": searchText}).then(res => {
+  			this.setState({
+          textUnits: res.textUnits,
+          error: "",
+          isWaitingForResults: false,
+          sentenceResultsCache: {...this.state.sentenceResultsCache, [searchText]: res.textUnits}
+        })
+  		}).catch(err => {
+  			var errorMessage = (err.response && err.response.data.msg) || "Error calling API"
+  			this.setState({isWaitingForResults: false, errorMessage})
+  		})
+    }
+	}
+
+  updateSearchText = e => this.setState({searchText: e.target.value})
+  examplePlaceholder() {
+    var randIdx = Math.floor(Math.random() * exampleQueries.length)
+    var examplePlaceholder = "e.g. " + exampleQueries[randIdx]
+    return examplePlaceholder
+  }
+
   async getWordSuggestions(word) {
     //make word vector
     let wordIndex = this.state.wordDict.fromWord[word]
@@ -391,23 +505,35 @@ class Editor extends React.Component {
   render() {
     let doRenderDropdown = this.state.activeWord.pos != null
     if (doRenderDropdown) {
-      var x = this.state.activeWord.pos.x
-      var  y = this.state.activeWord.pos.y + 23
+      let pos = this.state.activeWord.pos
+      var x = pos.x + pos.width + 10
+      var y = pos.y
+      // var x = pos.x
+      // var  y = pos.y + 23
     }
     return (
-      <div style={{height: "100%", width: "100%", display: "flex", justifyContent: "center"}}>
-      <div style={{width: "100%", maxWidth: "900px"}}>
-        <StatusBar state={this.state.loadState} progress={this.state.loadProgress} loaded={this.state.vectorsLoaded} logout={() => this.props.signOut()} />
-        <div style={this.styles.editor}>
-          {this.state.finishedDownloadingEditorState && <Draft.Editor
-            editorState={this.state.editorState}
-            onChange={this.onChange.bind(this)}
-            handleKeyCommand={this.handleKeyCommand.bind(this)}
-            style={{}}
-          />}
+      <div style={{height: "100%", width: "100%", display: "flex", justifyContent: "center", flexDirection: "row"}}>
+        <div style={{width: "100%", height:"100%", display:"flex", flexDirection:"column", maxWidth: "800px"}}>
+          <StatusBar state={this.state.loadState} progress={this.state.loadProgress} loaded={this.state.vectorsLoaded} logout={() => this.props.signOut()} />
+          <div style={this.styles.editor}>
+            {this.state.finishedDownloadingEditorState && <Draft.Editor
+              editorState={this.state.editorState}
+              onChange={this.onChange.bind(this)}
+              handleKeyCommand={this.handleKeyCommand.bind(this)}
+              style={{}}
+            />}
+          </div>
+          {doRenderDropdown && <Dropdown similarWords={this.state.similarWords} position={{x, y}}/>}
         </div>
-        {doRenderDropdown && <Dropdown similarWords={this.state.similarWords} position={{x, y}}/>}
-      </div>
+        <div style={{width: "100%", maxWidth:"350px", overflow: "auto"}}>
+          <BookEngineListings
+            onSearchSubmit={() => this.search(this.state.searchText)}
+            searchText={this.state.searchText}
+            onSearchChange={e => this.updateSearchText(e)}
+            isWaitingForResults={this.state.isWaitingForResults}
+            textUnits={this.state.textUnits}
+            />
+        </div>
       </div>
     )
   }
@@ -521,6 +647,233 @@ class StatusBar extends React.Component {
       <div style={this.style.bar}>
         <div><button style={this.statusStyle}>{this.props.state[0] + " "} {doShowProgress && progress}</button></div>
         <div><button style={this.buttonStyle} onClick={() => this.props.logout()}>Logout</button></div>
+      </div>
+    )
+  }
+}
+
+class BookEngineListings extends React.Component {
+
+	style = {
+    width: "100%",
+		fontSize: "16px",
+		fontFamily: "Arial",
+		lineHeight: 1.3
+	}
+
+	headerStyle = {
+		fontSize: "35px",
+    height: "50px",
+    paddingTop: "5px",
+		paddingLeft: "10px",
+		paddingRight: "10px",
+    boxSizing: "border-box",
+	}
+
+	constructor(props) {
+		super(props)
+		this.state = {}
+	}
+
+	render() {
+		return (
+		 <div style={{height: "100%", display: "flex", justifyContent: "center"}}>
+			 <div style={this.style}>
+				 <div style={this.headerStyle}>Book Engine</div>
+         <div style={{paddingLeft: "10px", paddingRight: "10px"}}>
+  				 <div style={{marginBottom: "20px", marginTop: "15px"}}>
+  					 <SearchBar
+  						 onSubmit={this.props.onSearchSubmit}
+  						 onChange={this.props.onSearchChange}
+  						 disabled={this.props.isWaitingForResults}
+  						 value={this.props.searchText}
+  						 isLoading={this.props.isWaitingForResults}
+  						/>
+  				 </div>
+  				{this.props.textUnits.map(unit => <ResultItem key={unit.vectorNum} unit={unit} />)}
+  				<div style={{marginTop: "30px", marginBottom: "30px", border: "1px solid #fff", borderRadius: "4px", padding: "5px"}}>
+  				</div>
+        </div>
+			 </div>
+		 </div>
+		)
+	}
+
+}
+
+class ResultItem extends React.Component {
+
+	style = {
+		// boxShadow: "0px 0px 3px #ccc",
+		padding: "20px",
+		paddingTop: "20px",
+		paddingBottom: "20px",
+		borderRadius: "4px",
+	}
+
+	textAreaStyle = {
+		cursor: "pointer",
+		padding: "5px",
+		paddingRight: "15px", //scroll bar space
+	}
+
+	infoStringStyle = {
+		marginTop: "20px",
+		textAlign: "right",
+		fontSize: "16px",
+		width: "60%",
+		padding: "5px",
+		borderRadius: "5px",
+		border: "1px solid #000",
+	}
+
+	constructor(props) {
+		super(props)
+		this.state = {
+			expanded: false,
+			hovering: false,
+			isLoading: false,
+			units: [this.props.unit],
+		}
+		this.textAreaRef = React.createRef()
+	}
+
+	formatText(text) {
+		text = text.replace("--", "—") //em dash
+		var parts = text.split(/(_.+?_|=.+?=)/g)
+		for(var i=1; i<parts.length; i+=2) {
+			if (parts[i][0] == "_") {
+				var part = parts[i].slice(1, parts[1].length-1)
+				parts[i] = <b key={i}>{part}</b>
+			}
+			else if (parts[i][0] == "=") {
+				var part = parts[i].slice(1, parts[1].length-1)
+				parts[i] = <i key={i}>{part}</i>
+			}
+		}
+		return parts
+	}
+
+	range(start, end) {
+		var range = []
+		for (var i=start; i<end; i++) {
+			range.push(i)
+		}
+		return range
+	}
+
+	fetchMoreText() {
+		var numToAdd = 15
+		var bookNum = this.props.unit.bookNum
+		if (this.state.isLoading) {
+			return
+		}
+		this.setState({isLoading: true})
+		var start = this.state.units[this.state.units.length-1].inBookLocation + 1
+		var inBookLocations = this.range(start, start+numToAdd)
+		var bottomPromise = fetchFromServer(API_HELPER_URL, {bookNum, inBookLocations})
+		var end = this.state.units[0].inBookLocation
+		var inBookLocations= this.range(end-numToAdd, end)
+		var topPromise = fetchFromServer(API_HELPER_URL, {bookNum, inBookLocations})
+		//Updates bottom first, then top
+		Promise.all([bottomPromise, topPromise]).then(allRes => {
+			this.setState(state => ({units: [...state.units, ...allRes[0].textUnits]}), () => {
+				this.setState(state => {
+					var prevHeight = this.textAreaRef.current.scrollHeight
+					var prevScrollTop = this.textAreaRef.current.scrollTop //chrome modifies scrollTop when content added to top
+					return ({units: [...allRes[1].textUnits, ...state.units], isLoading: false, prevHeight, prevScrollTop})
+				}, () => {
+					var heightDiff = this.textAreaRef.current.scrollHeight - this.state.prevHeight
+					this.textAreaRef.current.scrollTop = this.state.prevScrollTop + heightDiff
+				})
+			})
+		})
+	}
+
+	render() {
+		var unit = this.props.unit
+		var onHover = e => this.setState({hovering: true})
+		var onUnHover = e => this.setState({hovering: false})
+		var onClick = e => {
+			this.setState({expanded: true})
+			this.fetchMoreText()
+		}
+		// var onClick = e => this.setState(state => ({expanded: !state.expanded}))
+		var hoverStyle = this.state.hovering ? {boxShadow: "0px 0px 3px #ccc"} : {}
+		var expandedStyle = this.state.expanded ? {height: "80%", overflow: "auto"} : {}
+		var fields = ["Title", "Author", "Author Birth", "Author Death"]
+		var [title, author, birth, death] = fields.map(k => (unit[k][0] ? unit[k][0] : "?"))
+		var includeAuthorString = (birth != "?") || (death != "?")
+		var authorString = "(" + birth + " - " + death + ")"
+		var infoString = title + " — " + author + " " + (includeAuthorString ? authorString : "")
+		var infoDiv = <div style={this.infoStringStyle}>{infoString}</div>
+
+		//can make heuristic: table of contents (e.g. search "test12345") have a bunch of em dashes in them.
+		// So say if the number of dashes exceeds ten, then break at those dashes.
+
+		return (
+			<React.Fragment>
+				<div style={{...this.style, ...hoverStyle}} onMouseOver={onHover} onMouseLeave={onUnHover}>
+					<div onClick={onClick} ref={this.textAreaRef} style={{...this.textAreaStyle, ...expandedStyle}}>
+						<div>{this.formatText(this.state.units[0]["textUnit"])}</div>
+						{this.state.units.slice(1).map(tu => (
+							<React.Fragment key={tu["inBookLocation"]}>
+								<br></br>
+								<div>{this.formatText(tu["textUnit"])}</div>
+							</React.Fragment>
+						))}
+					</div>
+					<div style={{display: "flex", justifyContent: "flex-end"}}>
+						{this.state.expanded && infoDiv}
+					</div>
+				</div>
+				<div style={{width: "100%", border: "none", height: "1px", backgroundColor: "black"}}/>
+			</React.Fragment>
+		)
+	}
+}
+
+class SearchBar extends React.Component{
+
+	style = {
+		borderRadius: "4px",
+		width: "100%",
+		boxShadow: "0px 1px 4px #ccc",
+		boxSizing: "border-box",
+		display: "flex",
+	}
+
+	inputStyle = {
+		borderRadius: "4px",
+		border: "none",
+		outline: "none",
+		padding: "10px",
+    overflow: "auto",
+		fontFamily: "inherit",
+		fontSize: "inherit",
+		width: "100%",
+		backgroundColor: "white",
+	}
+
+  constructor(props){
+    super(props);
+  }
+
+  render() {
+    let onSubmit = e => {e.preventDefault(); this.props.onSubmit()}
+    return (
+      <div style={this.style}>
+        <form onSubmit={onSubmit} style={{margin: 0, width: "100%"}}>
+          <input style={this.inputStyle}
+						placeholder={this.props.placeholder}
+						onChange={this.props.onChange}
+						disabled={this.props.disabled}
+						value={this.props.value}
+					/>
+        </form>
+				<div style={{display: "flex", justifyContent: "center", alignItems: "center", paddingRight: "5px"}}>
+					<LoadingIndicator isLoading={this.props.isLoading} onClicked={this.props.onSubmit} />
+				</div>
       </div>
     )
   }
@@ -706,6 +1059,5 @@ class LoadingIndicator extends React.Component {
   }
 
 }
-
 
 ReactDOM.render(<App />, document.getElementById("root"))
