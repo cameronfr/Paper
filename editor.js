@@ -1,5 +1,6 @@
 // cfz, September 2018.
-// TODO: novelty, 200ms wait before search to reduce lag, aesthetics, cleaning up word results.
+//TODO: Draft js doesn't work on android.
+
 
 const API_URL = "https://asia-northeast1-traininggpu.cloudfunctions.net/GutenBert"
 const API_HELPER_URL = "https://asia-northeast1-traininggpu.cloudfunctions.net/GutenBertHelper"
@@ -131,6 +132,7 @@ var exampleQueries = [
 	"are we alone in the universe?"
 ]
 
+// Re enable word vectors (wasm block) and sign in code
 class App extends React.Component {
 
   appConfig = new blockstack.AppConfig(['store_write'])
@@ -227,12 +229,37 @@ class Editor extends React.Component {
   constructor(props) {
     super(props)
 
+    this.state = {
+      editorState: null,
+      finishedDownloadingEditorState: false,
+      activeWord: {text: "", blockKey: "", pos: null},
+      similarWords: [],
+      vectorsLoaded: false,
+      wordDict: null,
+      wordVectors: null,
+      userData: null,
+      loadProgress: 0.0,
+      loadState: ["Downloading word vectors", 0], //disabling word vectors for now
+      // loadState: ["Ready", 2],
+      lastChange: Date.now(),
+      lastChangeTimeout: null,
+
+			textUnits: [],
+			isWaitingForResults: false,
+			searchText: "",
+			errorMessage: "",
+			examplePlaceholder: this.examplePlaceholder(),
+      previousSentence: "",
+      sentenceResultsCache: {},
+    }
+
+  }
+
+  componentDidMount() {
+
     let onProgress = loadProgress => {this.setState({loadProgress})}
 
-    // tf.setBackend("cpu") //using webgl backend causes slight freeze after every big matrix op
-    // Disable vectors for now
-
-    tf.setBackend('wasm')
+    tf.setBackend("wasm")
       .then(() => fetchWordVectors(onProgress))
       .then(buffer => {
         this.setState({loadState: ["Loading word vectors", 1], loadProgress: 0})
@@ -262,30 +289,6 @@ class Editor extends React.Component {
       }
       this.setState({editorState: newEditor, finishedDownloadingEditorState: true})
     })
-
-    this.state = {
-      editorState: null,
-      finishedDownloadingEditorState: false,
-      activeWord: {text: "", blockKey: "", pos: null},
-      similarWords: [],
-      vectorsLoaded: false,
-      wordDict: null,
-      wordVectors: null,
-      userData: null,
-      loadProgress: 0.0,
-      loadState: ["Downloading word vectors", 0], //disabling word vectors for now
-      // loadState: ["Ready", 2],
-      lastChange: Date.now(),
-      lastChangeTimeout: null,
-
-			textUnits: [],
-			isWaitingForResults: false,
-			searchText: "",
-			errorMessage: "",
-			examplePlaceholder: this.examplePlaceholder(),
-      previousSentence: "",
-      sentenceResultsCache: {},
-    }
 
     let save = async () => {
       this.state.vectorsLoaded && this.setState({loadState: ["Saving", 2]})
@@ -420,16 +423,12 @@ class Editor extends React.Component {
       let start = selectionState.getStartOffset()
       let wordStart = text.lastIndexOf(" ", start-2) + 1
 
-      const cursorCharacter = "$$$^$$$" //since compromise.js (nlp(...) obj) does not support char pos
+      const cursorCharacter = "xbcwuzyvqa" //since compromise.js (nlp(...) obj) does not support char pos
       text = text.slice(0, wordStart) + cursorCharacter + " " + text.slice(wordStart, text.length)
       let nlpResult = nlp(text)
-      let sentences = nlpResult.sentences().list
-      for (let sent of sentences) {
-        if (cursorCharacter in sent.cache.words) {
-          return sent.text().replace(cursorCharacter + " ", "")
-        }
-      }
-      return null
+      let sentence = nlpResult.match(cursorCharacter).sentences().text()
+      sentence = sentence.replace(cursorCharacter + " ", "").replace(cursorCharacter, "") //to catch possible space
+      return sentence
   }
 
 	search(searchText) {
@@ -482,9 +481,6 @@ class Editor extends React.Component {
     let similarWordIndexes = getHighestKIndices(similarityData, 10)
     let similarWords = similarWordIndexes.map(x => this.state.wordDict.fromIdx[x])
     return similarWords
-  }
-
-  componentDidMount() {
   }
 
   componentDidUpdate() {
